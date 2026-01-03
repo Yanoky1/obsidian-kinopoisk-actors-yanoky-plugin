@@ -1,0 +1,9 @@
+{
+  "apiToken": "3YASTH0-S1AMTFB-QRJTXBF-S42R765",
+  "movieFileNameFormat": "{{name}}",
+  "movieFolder": "Dataview/Кино/Актеры_Режиссеры",
+  "movieTemplateFile": "Templates/Links/Link Актеры_Режиссеры.md",
+  "seriesFileNameFormat": "{{name}}",
+  "seriesFolder": "Dataview/Кино/Актеры_Режиссеры",
+  "seriesTemplateFile": "Templates/Links/Link Актеры_Режиссеры kp.md"
+}

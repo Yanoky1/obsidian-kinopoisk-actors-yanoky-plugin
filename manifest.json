@@ -1,0 +1,10 @@
+{
+	"id": "obsidian-kinopoisk-actors-yanoky-plugin",
+	"name": "Kinopoisk search actors",
+	"version": "1.0.1",
+	"minAppVersion": "1.0.1",
+	"description": "Helps you actors via Kinopoisk and create notes in obsidian",
+	"author": "Yanoky1",
+	"authorUrl": "https://github.com/Yanoky1",
+	"isDesktopOnly": false
+}
