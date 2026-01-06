@@ -1,138 +1,222 @@
+/**
+ * provider.ts
+ *
+ * Data provider for Kinopoisk API integration.
+ * Handles movie and TV show data retrieval from kinopoisk.dev API
+ * and transforms it for use in Obsidian templates.
+ */
 import { requestUrl } from "obsidian";
 import {
 	KinopoiskSuggestItem,
 	KinopoiskSuggestItemsResponse,
 	KinopoiskFullInfo,
 } from "Models/kinopoisk_response";
-import { MoviewShow } from "Models/MovieShow.model";
-import { capitalizeFirstLetter } from "Utils/utils";
+import { MovieShow } from "Models/MovieShow.model";
+import { ErrorHandler } from "APIProvider/ErrorHandler";
+import { DataFormatter } from "APIProvider/DataFormatter";
+import { ApiValidator } from "APIProvider/ApiValidator";
+import { t, tWithParams } from "../i18n";
 
-export async function apiGet<T>(
-	url: string,
-	token: string,
-	params: Record<string, string | number> = {},
-	headers?: Record<string, string>
-): Promise<T> {
-	const apiURL = new URL(url);
-	Object.entries(params).forEach(([key, value]) => {
-		apiURL.searchParams.append(key, value?.toString());
-	});
-	if (token === "") {
-		throw new Error("You need enter API Token");
+const API_BASE_URL = "https://api.kinopoisk.dev/v1.4";
+const MAX_SEARCH_RESULTS = 50;
+
+export class KinopoiskProvider {
+	private errorHandler: ErrorHandler;
+	private dataFormatter: DataFormatter;
+	private validator: ApiValidator;
+
+	constructor(settings?: {
+		movieFolder: string;
+	}) {
+		this.errorHandler = new ErrorHandler();
+		this.dataFormatter = new DataFormatter();
+		this.validator = new ApiValidator();
+
+		if (settings) {
+			this.dataFormatter.setSettings(settings);
+		}
+
+		this.dataFormatter.setFetchSpouseDataFunction(
+			(id: number) => this.fetchPersonById(id)
+		);
+
 	}
-	const res = await requestUrl({
-		url: apiURL.href,
-		method: "GET",
-		headers: {
-			Accept: "*/*",
-			"X-API-KEY": token,
-			...headers,
-		},
-	});
-	return res.json as T;
-}
 
 
-function fixPhotoUrl(url: string | null | undefined): string {
-	if (!url) return "";
-	// Убираем дублированный протокол https:https:// -> https://
-	return url.replace(/^https:https:\/\//, "https://");
+	// Внутри класса KinopoiskProvider
+	public updateSettings(settings: { movieFolder: string }): void {
+		this.dataFormatter.setSettings(settings); //
+	}
+
+	private async fetchPersonById(id: number): Promise<KinopoiskFullInfo> {
+		// Используем сохраненный токен или требуем его передачи
+		// Для простоты предполагаем, что токен доступен
+		const token = (this as any).lastUsedToken || "";
+
+		if (!token) {
+			throw new Error("Token not available for spouse data fetch");
+		}
+
+		return await this.apiGet<KinopoiskFullInfo>(
+			`/person/${id}`,
+			token
+		);
+	}
+
+
+	/**
+	 * Performs HTTP GET request to API
+	 */
+	private async apiGet<T>(
+		endpoint: string,
+		token: string,
+		params: Record<string, string | number> = {},
+		headers?: Record<string, string>
+	): Promise<T> {
+		if (!this.validator.isValidToken(token)) {
+			throw new Error(t("provider.tokenRequired"));
+		}
+
+		const url = this.buildUrl(endpoint, params);
+
+		try {
+			const res = await requestUrl({
+				url,
+				method: "GET",
+				headers: {
+					Accept: "*/*",
+					"X-API-KEY": token.trim(),
+					...headers,
+				},
+			});
+
+			return res.json as T;
+		} catch (error: unknown) {
+			throw this.errorHandler.handleApiError(error);
+		}
+	}
+
+	/**
+	 * Builds URL with query parameters
+	 */
+	private buildUrl(
+		endpoint: string,
+		params: Record<string, string | number>
+	): string {
+		const url = new URL(`${API_BASE_URL}${endpoint}`);
+
+		for (const [key, value] of Object.entries(params)) {
+			if (value !== undefined && value !== null && value !== "") {
+				url.searchParams.set(key, value.toString());
+			}
+		}
+
+		return url.href;
+	}
+
+	/**
+	 * Search for movies and TV shows by query
+	 */
+	public async searchByQuery(
+		query: string,
+		token: string
+	): Promise<KinopoiskSuggestItem[]> {
+		if (!this.validator.isValidSearchQuery(query)) {
+			throw new Error(t("provider.enterMovieTitle"));
+		}
+
+		const searchResults = await this.apiGet<KinopoiskSuggestItemsResponse>(
+			"/person/search",
+			token,
+			{
+				query: query.trim(),
+				limit: MAX_SEARCH_RESULTS,
+			}
+		);
+
+		if (!searchResults.docs || searchResults.docs.length === 0) {
+			throw new Error(
+				tWithParams("provider.nothingFound", { query }) +
+				" " +
+				t("provider.tryChangeQuery")
+			);
+		}
+
+		return searchResults.docs;
+	}
+
+	/**
+	 * Retrieves detailed movie/TV show information by ID
+	 */
+	public async getMovieById(id: number, token: string, movieFolder: string): Promise<MovieShow> {
+
+		if (!this.validator.isValidMovieId(id)) {
+			throw new Error(t("provider.invalidMovieId"));
+		}
+
+		if (!this.validator.isValidToken(token)) {
+			throw new Error(t("provider.tokenRequiredForMovie"));
+		}
+
+		(this as any).lastUsedToken = token;
+
+		const movieData = await this.apiGet<KinopoiskFullInfo>(
+			`/person/${id}`,
+			token
+		);
+
+		if (!movieData) {
+			throw new Error(t("provider.movieInfoError"));
+		}
+
+		// Теперь createMovieShowFrom асинхронный
+		const movieShow = await this.dataFormatter.createMovieShowFrom(movieData);
+
+		return movieShow;
+	}
+
+	/**
+	 * Validates API token by making test request
+	 */
+	public async validateToken(token: string): Promise<boolean> {
+		if (!this.validator.isValidToken(token)) {
+			return false;
+		}
+
+		try {
+			await this.apiGet<{ docs: unknown[] }>("/person", token, {
+				page: 1,
+				limit: 1,
+			});
+			return true;
+		} catch {
+			return false;
+		}
+	}
 }
+
+// Legacy compatibility functions
+const provider = new KinopoiskProvider();
+
 
 
 export async function getByQuery(
 	query: string,
 	token: string
 ): Promise<KinopoiskSuggestItem[]> {
-	try {
-		const params = {
-			query: query,
-			limit: 30,
-		};
-		const searchResults = await apiGet<KinopoiskSuggestItemsResponse>(
-			"https://api.kinopoisk.dev/v1.4/person/search",
-			token,
-			params
-		);
-		// Исправляем URL фотографий в результатах поиска
-		return searchResults.docs.map(doc => ({
-			...doc,
-			photo: fixPhotoUrl(doc.photo)
-		}));
-	} catch (error) {
-		console.warn(error);
-		throw error;
-	}
+	return provider.searchByQuery(query, token);
 }
 
 export async function getMovieShowById(
 	id: number,
 	token: string,
 	movieFolder: string
-): Promise<MoviewShow> {
-	try {
-		const searchResul = await apiGet<KinopoiskFullInfo>(
-			`https://api.kinopoisk.dev/v1.4/person/${id}`,
-			token
-		);
-		return createMovieShowFrom(searchResul, movieFolder, token);
-	} catch (error) {
-		console.warn(error);
-		throw error;
-	}
+): Promise<MovieShow> {
+
+	provider.updateSettings({ movieFolder }); //
+	return provider.getMovieById(id, token, movieFolder);
 }
-9
-export async function createMovieShowFrom(
-	fullInfo: KinopoiskFullInfo,
-	movieFolder: string,
-	token: string
-): Promise<MoviewShow> {
-	const path = movieFolder ? `${movieFolder.replace(/\/$/, "")}/` : "";
 
-	// Обрабатываем супругов
-	let spousesLinks = "";
-	if (fullInfo.spouses && Array.isArray(fullInfo.spouses)) {
-		const spouseNames: string[] = [];
-
-		for (const spouse of fullInfo.spouses) {
-			if (!spouse) continue;
-
-			// Если имя уже есть - используем его
-			if (spouse.name) {
-				spouseNames.push(`[[${path}${spouse.name}]]`);
-			}
-			// Если имени нет, но есть id - запрашиваем данные
-			else if (spouse.id) {
-				try {
-					const spouseData = await apiGet<KinopoiskFullInfo>(
-						`https://api.kinopoisk.dev/v1.4/person/${spouse.id}`,
-						token
-					);
-					if (spouseData.name) {
-						spouseNames.push(`[[${path}${spouseData.name}|${spouseData.name}]]`);
-					}
-				} catch (error) {
-					console.warn(`Failed to fetch spouse data for id ${spouse.id}:`, error);
-					// Пропускаем этого супруга при ошибке
-				}
-			}
-		}
-
-		spousesLinks = spouseNames.join(", ");
-	}
-
-	return {
-		id: fullInfo.id,
-		name: fullInfo.name,
-		enName: fullInfo.enName,
-		spouses: spousesLinks,
-		photo: fixPhotoUrl(fullInfo.photo) ?? "",
-		kinopoiskUrl: `https://www.kinopoisk.ru/name/${fullInfo.id}/`,
-		sex: fullInfo.sex ?? "",
-		birthday: fullInfo.birthday?.split('T')[0] || "",
-		death: fullInfo.death?.split('T')[0] || "",
-		age: fullInfo.age?.toString() ?? "",
-		growth: fullInfo.growth?.toString() ?? "",
-	};
-
+export async function validateApiToken(token: string): Promise<boolean> {
+	return provider.validateToken(token);
 }

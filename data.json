@@ -1,9 +1,21 @@
 {
-  "apiToken": "3YASTH0-S1AMTFB-QRJTXBF-S42R765",
-  "movieFileNameFormat": "{{name}}",
-  "movieFolder": "Dataview/Кино/Актеры_Режиссеры",
+  "language": "ru",
+  "apiToken": "V8VZG2H-92W44ET-K6XHPCH-K3D6XFY",
+  "apiTokenValid": true,
+  "movieFileNameFormat": "{{id}}",
+  "movieFolder": "Dataview/Актеры_Режиссеры",
   "movieTemplateFile": "Templates/Links/Link Актеры_Режиссеры.md",
-  "seriesFileNameFormat": "{{name}}",
-  "seriesFolder": "Dataview/Кино/Актеры_Режиссеры",
-  "seriesTemplateFile": "Templates/Links/Link Актеры_Режиссеры kp.md"
+  "imagesFolder": "Dataview/Актеры_Режиссеры/attachments",
+  "saveImagesLocally": true,
+  "savePosterImage": true,
+  "autoFillOnCreate": true,
+  "seriesFileNameFormat": "{{nameForFile}}",
+  "seriesFolder": "Dataview/Кино",
+  "seriesTemplateFile": "Templates/Links/Link Кино new.md",
+  "actorsPath": "Dataview/Кино/Актеры_Режиссеры",
+  "directorsPath": "Dataview/Кино/Актеры_Режиссеры",
+  "writersPath": "Dataview/Кино/Актеры_Режиссеры",
+  "producersPath": "Dataview/Кино/Актеры_Режиссеры",
+  "saveCoverImage": true,
+  "saveLogoImage": true
 }

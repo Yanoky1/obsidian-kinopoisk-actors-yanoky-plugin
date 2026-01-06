@@ -1,8 +1,15 @@
+/**
+ * main.ts
+ *
+ * Main plugin class for Kinopoisk API integration in Obsidian.
+ * Coordinates the entire workflow of searching and creating /series notes.
+ */
+
 import { Notice, Plugin, MarkdownView, TFile, TAbstractFile } from "obsidian";
 import { SearchModal } from "Views/search_modal";
 import { ItemsSuggestModal } from "Views/suggest_modal";
 import { KinopoiskSuggestItem } from "Models/kinopoisk_response";
-import { MoviewShow } from "Models/MovieShow.model";
+import { MovieShow } from "Models/MovieShow.model";
 import {
 	ObsidianKinopoiskPluginSettings,
 	DEFAULT_SETTINGS,
@@ -13,7 +20,9 @@ import {
 	getTemplateContents,
 	replaceVariableSyntax,
 } from "Utils/utils";
-import { getByQuery } from "APIProvider/provider";
+import { CursorJumper } from "Utils/cursor_jumper";
+import { initializeLanguage } from "./i18n";
+import { getByQuery, getMovieShowById } from "APIProvider/provider";
 
 export default class ObsidianKinopoiskPlugin extends Plugin {
 	settings: ObsidianKinopoiskPluginSettings;
@@ -21,12 +30,15 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 
+		// Initialize language from settings or auto-detect
+		initializeLanguage(this.settings.language);
+
 		this.addRibbonIcon("circle-user-round", "Search in Kinopoisk actors", () => {
 			this.createNewNote();
 		});
 
 		this.addCommand({
-			id: "open-search-kinopoisk-actor-modal",
+			id: "open-search-kinopoisk-modal",
 			name: "Search",
 			callback: () => {
 				this.createNewNote();
@@ -48,21 +60,6 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 			},
 		});
 
-		this.addCommand({
-			id: "fill-current-actor-file",
-			name: "Fill current file with actor data",
-			checkCallback: (checking: boolean) => {
-				const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (activeView?.file) {
-					if (!checking) {
-						this.fillCurrentActorFile();
-					}
-					return true;
-				}
-				return false;
-			},
-		});
-
 		// Отслеживаем создание новых файлов
 		this.registerEvent(
 			this.app.vault.on('create', (file: TAbstractFile) => {
@@ -74,6 +71,15 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 		);
 
 		this.addSettingTab(new ObsidianKinopoiskSettingTab(this.app, this));
+	}
+
+	// Shows error notification to user
+	showNotice(error: Error) {
+		try {
+			new Notice(error.message);
+		} catch {
+			// eslint-disable
+		}
 	}
 
 	async onFileCreated(file: TFile): Promise<void> {
@@ -100,7 +106,7 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 		}
 
 		// Берем имя файла как поисковый запрос
-		const actorName = file.basename;
+		const searchQuery = file.basename;
 
 		// Небольшая задержка, чтобы файл успел открыться
 		setTimeout(async () => {
@@ -109,34 +115,63 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 				const leaf = this.app.workspace.getLeaf(false);
 				await leaf.openFile(file);
 
-				// Выполняем поиск по имени файла
-				new Notice(`Searching for: ${actorName}`);
+				// ПРОВЕРКА: цифры или буквы
+				const isNumericId = /^\d+$/.test(searchQuery.trim());
 
-				const searchResults = await getByQuery(actorName, this.settings.apiToken);
+				let selectedActor: MovieShow;
 
-				if (!searchResults?.length) {
-					new Notice(`No results found for "${actorName}"`);
-					return;
+				if (isNumericId) {
+					// Если имя файла состоит только из цифр - это ID
+					const actorId = parseInt(searchQuery.trim());
+					new Notice(`Fetching actor by ID: ${actorId}`);
+
+					try {
+						// Получаем данные НАПРЯМУЮ по ID
+						selectedActor = await getMovieShowById(
+							actorId,
+							this.settings.apiToken,
+							this.settings.movieFolder
+						);
+					} catch (error) {
+						console.error("Error fetching by ID:", error);
+						new Notice(`Failed to fetch actor with ID ${actorId}`);
+						return;
+					}
+				} else {
+					// Если имя содержит буквы - обычный поиск
+					new Notice(`Searching for: ${searchQuery}`);
+
+					const searchResults = await getByQuery(searchQuery, this.settings.apiToken);
+
+					if (!searchResults?.length) {
+						new Notice(`No results found for "${searchQuery}"`);
+						return;
+					}
+
+					// Открываем suggest modal с результатами
+					selectedActor = await this.openSuggestModal(searchResults);
 				}
 
-				// Открываем suggest modal с результатами
-				const selectedActor = await this.openSuggestModal(searchResults);
+				// ✅ ДОБАВЬТЕ ЭТО: Обработка изображений
+				if (this.settings.saveImagesLocally) {
+					new Notice("Processing images...");
+
+					const { processImages } = await import("Utils/imageUtils");
+					selectedActor = await processImages(
+						this.app,
+						selectedActor,
+						this.settings,
+						(current, total, task) => {
+							console.log(`Image processing: ${current}/${total} - ${task}`);
+						}
+					);
+				}
 
 				// Получаем контент по шаблону
 				const renderedContents = await this.getRenderedContents(selectedActor);
 
 				// ОБНОВЛЯЕМ текущий файл
 				await this.app.vault.modify(file, renderedContents);
-
-				// Опционально: переименовываем файл по формату
-				const { movieFileNameFormat } = this.settings;
-				const newFileName = makeFileName(selectedActor, movieFileNameFormat);
-				const newFilePath = `${movieFolder}/${newFileName}`;
-
-				// Переименовываем только если путь отличается
-				if (file.path !== newFilePath) {
-					await this.app.fileManager.renameFile(file, newFilePath);
-				}
 
 				// Переключаем в режим чтения
 				const activeLeaf = this.app.workspace.getLeaf(false);
@@ -153,7 +188,7 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 		}, 300);
 	}
 
-	async fillCurrentActorFile(): Promise<void> {
+	async searchByCurrentActorName(): Promise<void> {
 		try {
 			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
 			if (!activeView || !activeView.file) {
@@ -163,107 +198,83 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 
 			const currentFile = activeView.file;
 
-			// Открываем модальное окно поиска
-			const movieShow = await this.searchMovieShow();
-
-			// Получаем контент по шаблону
-			const renderedContents = await this.getRenderedContents(movieShow);
-
-			// ОБНОВЛЯЕМ текущий файл вместо создания нового
-			await this.app.vault.modify(currentFile, renderedContents);
-
-			// Опционально: переименовываем файл по формату
-			const { movieFileNameFormat, movieFolder } = this.settings;
-			const newFileName = makeFileName(movieShow, movieFileNameFormat);
-			const newFilePath = `${movieFolder}/${newFileName}`;
-
-			// Переименовываем только если путь отличается
-			if (currentFile.path !== newFilePath) {
-				await this.app.fileManager.renameFile(currentFile, newFilePath);
-			}
-
-			new Notice("Actor data added successfully!");
-
-		} catch (err) {
-			console.warn(err);
-			this.showNotice(err);
-		}
-	}
-
-	showNotice(error: Error) {
-		try {
-			new Notice(error.message);
-		} catch {
-			// eslint-disable
-		}
-	}
-
-	async searchByCurrentActorName(): Promise<void> {
-		try {
-			const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
-			if (!activeView || !activeView.file) {
-				new Notice("No active file");
-				return;
-			}
-
 			// Получаем метаданные файла
 			const cache = this.app.metadataCache.getFileCache(activeView.file);
-			let actorName = "";
+			let searchQuery = "";
 
 			// Пытаемся получить имя из frontmatter
 			if (cache?.frontmatter?.name) {
-				actorName = cache.frontmatter.name;
+				searchQuery = cache.frontmatter.name;
 			} else if (cache?.frontmatter?.enName) {
-				actorName = cache.frontmatter.enName;
+				searchQuery = cache.frontmatter.enName;
 			} else {
 				// Если в frontmatter нет, берем из названия файла (без .md)
-				actorName = activeView.file.basename;
+				searchQuery = activeView.file.basename;
 			}
 
-			if (!actorName) {
+			if (!searchQuery) {
 				new Notice("Cannot extract actor name from current file");
 				return;
 			}
 
-			new Notice(`Searching for: ${actorName}`);
+			// ПРОВЕРКА: цифры или буквы
+			const isNumericId = /^\d+$/.test(searchQuery.trim());
 
-			// Выполняем поиск
-			const searchResults = await getByQuery(actorName, this.settings.apiToken);
+			let selectedActor: MovieShow;
 
-			if (!searchResults?.length) {
-				new Notice(`No results found for "${actorName}"`);
-				return;
+			if (isNumericId) {
+				// Если имя файла состоит только из цифр - это ID
+				const actorId = parseInt(searchQuery.trim());
+				new Notice(`Fetching actor by ID: ${actorId}`);
+
+				try {
+					// Получаем данные НАПРЯМУЮ по ID без поиска
+					selectedActor = await getMovieShowById(
+						actorId,
+						this.settings.apiToken,
+						this.settings.movieFolder
+					);
+				} catch (error) {
+					console.error("Error fetching by ID:", error);
+					new Notice(`Failed to fetch actor with ID ${actorId}`);
+					return;
+				}
+			} else {
+				// Если имя содержит буквы - обычный поиск
+				new Notice(`Searching for: ${searchQuery}`);
+
+				try {
+					const searchResults = await getByQuery(searchQuery, this.settings.apiToken);
+
+					if (!searchResults?.length) {
+						new Notice(`No results found for "${searchQuery}"`);
+						return;
+					}
+
+					// Открываем suggest modal с результатами
+					selectedActor = await this.openSuggestModal(searchResults);
+				} catch (error) {
+					console.error("Error searching:", error);
+					new Notice(`Search failed for "${searchQuery}"`);
+					return;
+				}
 			}
 
-			// Открываем suggest modal с результатами
-			const selectedActor = await this.openSuggestModal(searchResults);
-
-			// Создаем заметку для выбранного актера
-			const {
-				movieFileNameFormat,
-				movieFolder,
-			} = this.settings;
-
+			// Получаем контент по шаблону
 			const renderedContents = await this.getRenderedContents(selectedActor);
-			const fileName = makeFileName(selectedActor, movieFileNameFormat);
-			const filePath = `${movieFolder}/${fileName}`;
-			const targetFile = await this.app.vault.create(
-				filePath,
-				renderedContents
-			);
-			const newLeaf = this.app.workspace.getLeaf(true);
-			if (!newLeaf) {
-				console.warn("No new leaf");
-				return;
-			}
-			await newLeaf.openFile(targetFile, { state: { mode: "preview" } });
+
+			// ОБНОВЛЯЕМ текущий файл (БЕЗ переименования)
+			await this.app.vault.modify(currentFile, renderedContents);
+
+			new Notice("Actor data added successfully!");
 
 		} catch (err) {
-			console.warn(err);
-			this.showNotice(err);
+			console.error("Error in searchByCurrentActorName:", err);
+			this.showNotice(err instanceof Error ? err : new Error("Unknown error"));
 		}
 	}
 
+	// Main workflow: search -> select -> create note with template
 	async createNewNote(): Promise<void> {
 		try {
 			const movieShow = await this.searchMovieShow();
@@ -276,7 +287,21 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 			const renderedContents = await this.getRenderedContents(movieShow);
 			const fileNameFormat = movieFileNameFormat;
 			const folderPath = movieFolder;
-			const fileName = makeFileName(movieShow, fileNameFormat);
+
+			// Create folder if it doesn't exist
+			if (
+				folderPath &&
+				!(await this.app.vault.adapter.exists(folderPath))
+			) {
+				await this.app.vault.createFolder(folderPath);
+			}
+
+			const fileName = await makeFileName(
+				this.app,
+				movieShow,
+				fileNameFormat,
+				folderPath
+			);
 			const filePath = `${folderPath}/${fileName}`;
 			const targetFile = await this.app.vault.create(
 				filePath,
@@ -288,17 +313,23 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 				return;
 			}
 			await newLeaf.openFile(targetFile, { state: { mode: "preview" } });
+			newLeaf.setEphemeralState({ rename: "all" });
+
+			// Jump cursor to next template location
+			await new CursorJumper(this.app).jumpToNextCursorLocation();
 		} catch (err) {
 			console.warn(err);
 			this.showNotice(err);
 		}
 	}
 
-	async searchMovieShow(): Promise<MoviewShow> {
+	// Coordinates search process: search then select from results
+	async searchMovieShow(): Promise<MovieShow> {
 		const searchedItems = await this.openSearchModal();
 		return await this.openSuggestModal(searchedItems);
 	}
 
+	// Opens search modal and returns found items
 	async openSearchModal(): Promise<KinopoiskSuggestItem[]> {
 		return new Promise((resolve, reject) => {
 			return new SearchModal(this, (error, results) => {
@@ -307,20 +338,17 @@ export default class ObsidianKinopoiskPlugin extends Plugin {
 		});
 	}
 
-	async openSuggestModal(items: KinopoiskSuggestItem[]): Promise<MoviewShow> {
+	// Opens suggestion modal and returns detailed info about selected item
+	async openSuggestModal(items: KinopoiskSuggestItem[]): Promise<MovieShow> {
 		return new Promise((resolve, reject) => {
-			return new ItemsSuggestModal(
-				this,
-				items,
-				this.settings.movieFolder,
-				(error, selectedItem) => {
-					return error ? reject(error) : resolve(selectedItem!);
-				}
-			).open();
+			return new ItemsSuggestModal(this, items, (error, selectedItem) => {
+				return error ? reject(error) : resolve(selectedItem!);
+			}).open();
 		});
 	}
 
-	async getRenderedContents(movieShow: MoviewShow) {
+	// Loads template content and fills it with movie/series data
+	async getRenderedContents(movieShow: MovieShow) {
 		const { movieTemplateFile } = this.settings;
 		const templateFile = movieTemplateFile;
 		if (templateFile) {

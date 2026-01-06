@@ -1,3 +1,13 @@
+/**
+ * kinopoisk_response.ts
+ *
+ * Types and interfaces for Kinopoisk API (kinopoisk.dev)
+ * Defines data structures for movie/series search and detailed information
+ */
+
+/**
+ * Search result item
+ */
 export interface KinopoiskSuggestItem {
 	id: number;
 	name: string;
@@ -9,10 +19,16 @@ export interface KinopoiskSuggestItem {
 	growth: string;
 }
 
+/**
+ * Search API response
+ */
 export interface KinopoiskSuggestItemsResponse {
 	docs: KinopoiskSuggestItem[];
 }
 
+/**
+ * Complete movie/series information from Kinopoisk API
+ */
 export interface KinopoiskFullInfo {
 	id: number;
 	name: string;
@@ -24,6 +40,9 @@ export interface KinopoiskFullInfo {
 	death: string;
 	age: string;
 	growth: string;
+	description: string;
+	profession: string;
+	enProfession: string;
 }
 
 export interface KinopoiskSpouses {
@@ -36,31 +55,5 @@ export interface KinopoiskSpouses {
 	relation?: string;
 }
 
-export interface KinopoisImageUrl {
-	url?: string;
-}
 
-export interface KinopoiskSimpleItem {
-	name: string;
-}
 
-export interface KinopoiskPerson {
-	name: string;
-	enProfession: string;
-}
-
-export interface KinopoiskSeasonInfo {
-	number: number;
-	episodesCount: number;
-}
-
-export interface KinopoiskRatings {
-	kp?: number;
-	imdb?: number;
-}
-
-export interface KinopoiskExternalIds {
-	imdb?: string;
-	tmdb?: number;
-	kpHD?: string;
-}

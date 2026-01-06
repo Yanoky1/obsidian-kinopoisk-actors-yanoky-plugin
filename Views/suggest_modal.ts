@@ -1,155 +1,301 @@
-import { SuggestModal } from "obsidian";
+/**
+ * suggest_modal.ts
+ *
+ * Modal for selecting movies/TV shows from search results.
+ * Displays search results with posters, handles filtering and detailed data fetching.
+ */
+
+import { SuggestModal, Notice } from "obsidian";
 import { KinopoiskSuggestItem } from "Models/kinopoisk_response";
-import { MoviewShow } from "Models/MovieShow.model";
-import { getMovieShowById } from "APIProvider/provider";
+import { MovieShow } from "Models/MovieShow.model";
+import { KinopoiskProvider } from "APIProvider/provider";
+import { processImages, ProgressCallback } from "Utils/imageUtils";
 import ObsidianKinopoiskPlugin from "main";
+import { t } from "../i18n";
+
+interface SuggestCallback {
+	(error: Error | null, result?: MovieShow): void;
+}
 
 export class ItemsSuggestModal extends SuggestModal<KinopoiskSuggestItem> {
 	private token = "";
-	private movieFolder = "";
+	private loadingNotice?: Notice;
+	private kinopoiskProvider: KinopoiskProvider;
 
 	constructor(
-		plugin: ObsidianKinopoiskPlugin,
+		private plugin: ObsidianKinopoiskPlugin,
 		private readonly suggestion: KinopoiskSuggestItem[],
-		movieFolder: string,
-		private onChoose: (error: Error | null, result?: MoviewShow) => void
+		private onChoose: SuggestCallback
 	) {
 		super(plugin.app);
 		this.token = plugin.settings.apiToken;
-		this.movieFolder = movieFolder;
+
+		// Передаем настройки с путями
+		this.kinopoiskProvider = new KinopoiskProvider({
+			movieFolder: plugin.settings.movieFolder
+		});
 	}
 
+	// Filters suggestions by search query
 	getSuggestions(query: string): KinopoiskSuggestItem[] {
-		const searchQuery = query?.toLowerCase().trim();
-		
-		if (!searchQuery) {
-			// Если запрос пустой, сортируем только по наличию фото
-			return this.suggestion
-				.filter(item => itemHasImage(item))
-				.concat(
-					this.suggestion.filter(item => !itemHasImage(item))
-				);
-		}
-
-		return this.suggestion
-			.map(item => {
-				// Вычисляем релевантность для каждого элемента
-				const relevanceScore = calculateRelevanceScore(item, searchQuery);
-				const hasImage = itemHasImage(item) ? 1 : 0;
-				
-				return {
-					item,
-					relevanceScore,
-					hasImage
-				};
-			})
-			.sort((a, b) => {
-				// Сначала сортируем по релевантности (больше = лучше)
-				if (b.relevanceScore !== a.relevanceScore) {
-					return b.relevanceScore - a.relevanceScore;
-				}
-				
-				// Если релевантность одинаковая, сортируем по наличию фото
-				if (b.hasImage !== a.hasImage) {
-					return b.hasImage - a.hasImage;
-				}
-				
-				// Дополнительная сортировка по длине названия
-				return (a.item.name?.length || 0) - (b.item.name?.length || 0);
-			})
-			.map(data => data.item);
+		return this.suggestion.filter((item) => {
+			const searchQuery = query?.toLowerCase();
+			return (
+				item.name.toLowerCase().includes(searchQuery) ||
+				item.enName.toLowerCase().includes(searchQuery)
+			);
+		});
 	}
 
-	// Renders each suggestion item.
+	// Validates image URL
+	private isValidImageUrl(url?: string): boolean {
+		if (!url || url.trim() === "") return false;
+
+		try {
+			new URL(url);
+			return url.startsWith("http://") || url.startsWith("https://");
+		} catch {
+			return false;
+		}
+	}
+
+	// Creates poster image element or placeholder
+	private createPosterElement(
+		item: KinopoiskSuggestItem,
+		container: HTMLElement
+	): HTMLElement {
+		const posterUrl = item.photo;
+
+		if (this.isValidImageUrl(posterUrl)) {
+			const imgElement = container.createEl("img", {
+				cls: "kinopoisk-plugin__suggest-poster",
+			});
+
+			imgElement.src = posterUrl!;
+
+			// Handle image loading error
+			imgElement.addEventListener("error", () => {
+				const placeholder = container.createEl("div", {
+					text: t("modals.posterPlaceholderEmoji"),
+					cls: "kinopoisk-plugin__suggest-poster-placeholder",
+				});
+				placeholder.title = t("modals.posterTooltipGeoblock");
+				imgElement.replaceWith(placeholder);
+			});
+
+			return imgElement;
+		} else {
+			// Show placeholder if URL is invalid or missing
+			const placeholder = container.createEl("div", {
+				text: t("modals.posterPlaceholderEmoji"),
+				cls: "kinopoisk-plugin__suggest-poster-placeholder",
+			});
+
+			// Determine reason and add tooltip
+			const reason = !posterUrl
+				? t("modals.posterTooltipMissing")
+				: posterUrl.trim() === ""
+					? t("modals.posterTooltipEmptyLink")
+					: t("modals.posterTooltipInvalidLink");
+			placeholder.title = reason;
+
+			return placeholder;
+		}
+	}
+
+	// Renders list item with poster and movie info
 	renderSuggestion(item: KinopoiskSuggestItem, el: HTMLElement) {
 		const title = item.name;
-		const subtitle = `${item.age}, ${item.sex}, ${item.enName}`;
+		const subtitle = `Возраст: ${item.age}, Рост: ${item.growth}, Пол: ${item.sex}`;
 
-		// Сначала создаем контейнер
 		const container = el.createEl("div", {
-			attr: { style: "display: flex; align-items: center;" },
+			cls: "kinopoisk-plugin__suggest-item",
 		});
 
-		// Добавляем изображение в контейнер
-		container.createEl("img", {
-			attr: {
-				src: item.photo ?? "",
-				width: "100",
-				style: "object-fit: cover; border-radius: 4px; margin-right: 1em;"
-			},
-		});
+		this.createPosterElement(item, container);
 
-		// Создаем блок с текстом внутри контейнера
 		const textInfo = container.createEl("div", {
-			attr: { style: "flex: 1;" },
+			cls: "kinopoisk-plugin__suggest-text-info",
 		});
-
-		textInfo.createEl("div", { 
-			text: title,
-			attr: { style: "font-weight: bold; font-size: 1.1em;" }
-		});
-		textInfo.createEl("small", { text: subtitle });
+		textInfo.appendChild(el.createEl("div", { text: title }));
+		textInfo.appendChild(el.createEl("small", { text: subtitle }));
 	}
 
-	// Perform action on the selected suggestion.
+	// Handles item selection
 	onChooseSuggestion(item: KinopoiskSuggestItem) {
 		this.getItemDetails(item);
 	}
 
-	async getItemDetails(item: KinopoiskSuggestItem) {
-		try {
-			const movieShow = await getMovieShowById(item.id, this.token, this.movieFolder);
-			this.onChoose(null, movieShow);
-		} catch (error) {
-			this.onChoose(error);
+	// Manages loading notice display
+	private updateStatus(message: string, persistent: boolean = true): void {
+		this.hideLoadingNotice();
+		this.loadingNotice = new Notice(message, persistent ? 0 : 3000);
+	}
+
+	// Hides loading notice
+	private hideLoadingNotice(): void {
+		if (this.loadingNotice) {
+			this.loadingNotice.hide();
+			this.loadingNotice = undefined;
 		}
 	}
-}
 
-// Вспомогательные функции
+	// Updates existing loading notice text
+	private updateLoadingNotice(message: string): void {
+		if (this.loadingNotice) {
+			const noticeEl = this.loadingNotice.noticeEl;
+			if (noticeEl) {
+				noticeEl.textContent = message;
+			}
+		} else {
+			this.updateStatus(message);
+		}
+	}
 
-function itemHasImage(item: KinopoiskSuggestItem): boolean {
-	// Проверяем наличие фото для разных типов элементов
-	if ('photo' in item) {
-		return !!item.photo && item.photo !== "";
-	}
-	return false;
-}
+	// Creates progress text with percentage
+	private createProgressText(
+		current: number,
+		total: number,
+		task: string
+	): string {
+		if (total === 0) return task;
 
-function calculateRelevanceScore(item: KinopoiskSuggestItem, query: string): number {
-	let score = 0;
-	
-	// Проверяем точное совпадение в названии (самый высокий приоритет)
-	if (item.name?.toLowerCase() === query) {
-		score += 100;
+		const percentage = Math.round((current / total) * 100);
+		const progressBar = this.createProgressBar(current, total);
+
+		return `${task}\n${progressBar} ${current}/${total} (${percentage}%)`;
 	}
-	if (item.enName?.toLowerCase() === query) {
-		score += 100;
+
+	// Creates visual progress bar from characters
+	private createProgressBar(
+		current: number,
+		total: number,
+		length: number = 20
+	): string {
+		if (total === 0) return "";
+
+		const filled = Math.round((current / total) * length);
+		const empty = length - filled;
+
+		return "█".repeat(filled) + "░".repeat(empty);
 	}
-	
-	// Проверяем, начинается ли название с запроса
-	if (item.name?.toLowerCase().startsWith(query)) {
-		score += 50;
+
+	// Validates input data
+	private validateInput(item: KinopoiskSuggestItem): boolean {
+		if (!item?.id || item.id <= 0) {
+			new Notice(t("modals.errorMovieData"));
+			this.onChoose(new Error(t("modals.errorMovieData")));
+			return false;
+		}
+
+		if (!this.token?.trim()) {
+			new Notice(t("modals.needApiToken"));
+			this.onChoose(new Error(t("modals.needApiToken")));
+			return false;
+		}
+
+		return true;
 	}
-	if (item.enName?.toLowerCase().startsWith(query)) {
-		score += 50;
+
+	// Fetches movie data via API
+	private async fetchMovieData(itemId: number): Promise<MovieShow> {
+		return await this.kinopoiskProvider.getMovieById(itemId, this.token, this.plugin.settings.movieFolder);
 	}
-	
-	// Проверяем, заканчивается ли название запросом
-	if (item.name?.toLowerCase().endsWith(query)) {
-		score += 30;
+
+	// Processes movie images with progress tracking
+	private async processMovieImages(movieShow: MovieShow): Promise<MovieShow> {
+		this.updateLoadingNotice(t("modals.preparingImages"));
+
+		let imageProcessingCompleted = false;
+
+		// Progress callback for image processing
+		const progressCallback: ProgressCallback = (
+			current: number,
+			total: number,
+			currentTask: string
+		) => {
+			const progressText = this.createProgressText(
+				current,
+				total,
+				currentTask
+			);
+			this.updateLoadingNotice(progressText);
+
+			if (current === total) {
+				imageProcessingCompleted = true;
+			}
+		};
+
+		const processedMovieShow = await processImages(
+			this.plugin.app,
+			movieShow,
+			this.plugin.settings,
+			progressCallback
+		);
+
+		// Brief delay to show final status
+		if (imageProcessingCompleted) {
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+		}
+
+		return processedMovieShow;
 	}
-	if (item.enName?.toLowerCase().endsWith(query)) {
-		score += 30;
+
+	// Handles successful data retrieval
+	private handleSuccess(
+		movieShow: MovieShow,
+		hadImageProcessing: boolean = false
+	): void {
+		this.hideLoadingNotice();
+
+		if (!hadImageProcessing) {
+			new Notice(t("modals.movieInfoLoaded"));
+		}
+
+		this.onChoose(null, movieShow);
 	}
-	
-	// Проверяем наличие подстроки в названии
-	const nameContains = item.name?.toLowerCase().includes(query) ? query.length : 0;
-	const enNameContains = item.enName?.toLowerCase().includes(query) ? query.length : 0;
-	
-	// Чем больше часть запроса совпадает, тем выше балл
-	score += Math.max(nameContains, enNameContains) * 10;
-	
-	
-	return score;
+
+	// Handles errors during data retrieval
+	private handleError(error: unknown): void {
+		this.hideLoadingNotice();
+
+		const errorMessage =
+			error instanceof Error
+				? error.message
+				: t("modals.errorGettingDetails");
+		new Notice(errorMessage);
+
+		console.error("Error getting movie details:", error);
+		this.onChoose(error as Error);
+	}
+
+	// Fetches detailed movie information with image processing and progress tracking
+	async getItemDetails(item: KinopoiskSuggestItem) {
+		if (!this.validateInput(item)) {
+			return;
+		}
+
+		try {
+			this.updateStatus(t("modals.loadingMovieInfo"));
+
+			const movieShow = await this.fetchMovieData(item.id);
+
+			// Return immediately if local image saving is disabled
+			if (!this.plugin.settings.saveImagesLocally) {
+				this.handleSuccess(movieShow, false);
+				return;
+			}
+
+			const processedMovieShow = await this.processMovieImages(movieShow);
+			this.handleSuccess(processedMovieShow, true);
+		} catch (error) {
+			this.handleError(error);
+		}
+	}
+
+	// Clean up notices on close
+	onClose() {
+		this.hideLoadingNotice();
+		super.onClose();
+	}
 }

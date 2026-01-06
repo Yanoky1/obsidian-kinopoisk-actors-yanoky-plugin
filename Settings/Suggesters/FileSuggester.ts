@@ -1,6 +1,12 @@
-// Credits go to Liam's Periodic Notes Plugin: https://github.com/liamcain/obsidian-periodic-notes
+/**
+ * FileSuggester.ts
+ *
+ * File autocomplete component for plugin settings.
+ * Provides quick search and selection of .md files from Obsidian vault.
+ */
 
 import { TAbstractFile, TFile, AbstractInputSuggest, App } from "obsidian";
+import { t } from "i18n";
 
 export class FileSuggest extends AbstractInputSuggest<TFile> {
 	onSelectFile: (value: string) => void;
@@ -14,31 +20,48 @@ export class FileSuggest extends AbstractInputSuggest<TFile> {
 		this.onSelectFile = onSelectFile;
 	}
 
+	/**
+	 * Get files matching input text - filters only .md files
+	 */
 	getSuggestions(inputStr: string): TFile[] {
-		const abstractFiles = this.app.vault.getAllLoadedFiles();
-		const files: TFile[] = [];
-		const lowerCaseInputStr = inputStr.toLowerCase();
+		if (!inputStr) {
+			return [];
+		}
 
-		abstractFiles.forEach((file: TAbstractFile) => {
-			if (
-				file instanceof TFile &&
-				file.extension === "md" &&
-				file.path.toLowerCase().contains(lowerCaseInputStr)
-			) {
-				files.push(file);
-			}
-		});
+		try {
+			const abstractFiles = this.app.vault.getAllLoadedFiles();
+			const files: TFile[] = [];
+			const lowerCaseInputStr = inputStr.toLowerCase();
 
-		return files;
+			abstractFiles.forEach((file: TAbstractFile) => {
+				if (
+					file instanceof TFile &&
+					file.extension === "md" &&
+					file.path.toLowerCase().includes(lowerCaseInputStr)
+				) {
+					files.push(file);
+				}
+			});
+
+			// Limit results for performance
+			return files.slice(0, 20);
+		} catch (error) {
+			console.error(t("suggesters.fileListError"), error);
+			return [];
+		}
 	}
 
 	renderSuggestion(file: TFile, el: HTMLElement): void {
-		el.setText(file.path);
+		if (file && el) {
+			el.setText(file.path);
+		}
 	}
 
 	selectSuggestion(file: TFile): void {
-		this.setValue(file.path);
-		this.onSelectFile(file.path);
-		this.close();
+		if (file && file.path) {
+			this.setValue(file.path);
+			this.onSelectFile(file.path);
+			this.close();
+		}
 	}
 }
